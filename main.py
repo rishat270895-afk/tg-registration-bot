@@ -26,7 +26,7 @@ RESET_PASSWORD = os.getenv("RESET_PASSWORD", "")  # set in Railway -> Variables
 DB_PATH = "participants.sqlite"
 
 # Put your Telegram user_ids here (2 admins supported)
-ADMIN_IDS = {922603146, 222222222}  # <-- replace with real IDs
+ADMIN_IDS = {922603146,700087896 }  # <-- replace with real IDs
 
 
 # ---------- FSM ----------

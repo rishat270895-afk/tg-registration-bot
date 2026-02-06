@@ -1,5 +1,6 @@
 import asyncio
 import os
+import tempfile
 from datetime import datetime, date, timedelta
 
 import aiosqlite
@@ -23,12 +24,13 @@ from aiogram.fsm.context import FSMContext
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RESET_PASSWORD = os.getenv("RESET_PASSWORD", "")  # set in Railway -> Variables
 
+# DB file path
 DB_PATH = "participants.sqlite"
 # If you enabled Railway Volume mounted to /data, use this instead:
 # DB_PATH = "/data/participants.sqlite"
 
 # Put your Telegram user_ids here (2 admins supported)
-ADMIN_IDS = {922603146, 700087896}  # <-- replace with real IDs
+ADMIN_IDS = {922603146, 123456789}  # <-- replace with real IDs
 
 
 # ---------- FSM ----------
@@ -268,6 +270,9 @@ def autosize_worksheet_columns(ws):
 
 
 async def export_to_excel_and_send(message: Message, rows, suffix: str):
+    """
+    Save to /tmp because Railway filesystem may be read-only in app dir.
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Participants"
@@ -279,13 +284,68 @@ async def export_to_excel_and_send(message: Message, rows, suffix: str):
 
     autosize_worksheet_columns(ws)
 
-    filename = f"participants_{suffix}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_utc.xlsx"
-    wb.save(filename)
+    with tempfile.NamedTemporaryFile(prefix=f"participants_{suffix}_", suffix=".xlsx", delete=False, dir="/tmp") as tmp:
+        tmp_path = tmp.name
 
-    await message.answer_document(
-        FSInputFile(filename),
-        caption=f"Выгрузка участников: {len(rows)} записей"
-    )
+    wb.save(tmp_path)
+
+    try:
+        await message.answer_document(
+            FSInputFile(tmp_path),
+            caption=f"Выгрузка участников: {len(rows)} записей"
+        )
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+# ---------- List / Export core (NO fake Message!) ----------
+async def send_list(message: Message, args: str):
+    from_iso, to_iso, err = range_from_args(args)
+    if err:
+        await message.answer(err)
+        return
+
+    cnt = await count_participants(from_iso, to_iso)
+    rows = await fetch_participants(from_iso, to_iso)
+
+    preview = rows[:30]
+    lines = [f"{pid}. {fn} {ln} — {phone}" for (pid, tid, phone, fn, ln, consent, created_at) in preview]
+
+    label = "все записи"
+    if args.strip().lower() == "today":
+        label = "сегодня (UTC)"
+    elif args.strip():
+        label = f"диапазон: {args.strip()} (UTC)"
+
+    text = f"Фильтр: <b>{label}</b>\nВсего участников: <b>{cnt}</b>\n"
+    text += "Первые записи:\n" + ("\n".join(lines) if lines else "Пока пусто.")
+    if cnt > len(lines):
+        text += f"\n…и ещё {cnt - len(lines)}"
+
+    await message.answer(text, parse_mode="HTML")
+
+
+async def send_export(message: Message, args: str):
+    from_iso, to_iso, err = range_from_args(args)
+    if err:
+        await message.answer(err)
+        return
+
+    rows = await fetch_participants(from_iso, to_iso)
+    if not rows:
+        await message.answer("По этому фильтру нет участников.")
+        return
+
+    suffix = "all"
+    if args.strip().lower() == "today":
+        suffix = "today_utc"
+    elif args.strip():
+        suffix = args.strip().replace(" ", "_")
+
+    await export_to_excel_and_send(message, rows, suffix)
 
 
 # ---------- Public flow ----------
@@ -481,7 +541,8 @@ async def on_last_name(message: Message, state: FSMContext):
                 reply_markup=user_start_kb()
             )
         else:
-            await message.answer("Не удалось зарегистрировать (возможно, номер уже занят). Обратитесь к организатору.", reply_markup=user_start_kb())
+            await message.answer("Не удалось зарегистрировать (возможно, номер уже занят). Обратитесь к организатору.",
+                                 reply_markup=user_start_kb())
         await state.clear()
         return
 
@@ -511,61 +572,24 @@ async def admin_close_menu(message: Message, state: FSMContext):
     await message.answer("Меню закрыто.", reply_markup=ReplyKeyboardRemove())
 
 
+# Admin commands
 async def cmd_list(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("Команда доступна только администратору.")
         return
-
     args = message.text.replace("/list", "", 1).strip()
-    from_iso, to_iso, err = range_from_args(args)
-    if err:
-        await message.answer(err)
-        return
-
-    cnt = await count_participants(from_iso, to_iso)
-    rows = await fetch_participants(from_iso, to_iso)
-
-    preview = rows[:30]
-    lines = [f"{pid}. {fn} {ln} — {phone}" for (pid, tid, phone, fn, ln, consent, created_at) in preview]
-
-    label = "все записи"
-    if args.strip().lower() == "today":
-        label = "сегодня (UTC)"
-    elif args.strip():
-        label = f"диапазон: {args.strip()} (UTC)"
-
-    text = f"Фильтр: <b>{label}</b>\nВсего участников: <b>{cnt}</b>\n"
-    text += "Первые записи:\n" + ("\n".join(lines) if lines else "Пока пусто.")
-    if cnt > len(lines):
-        text += f"\n…и ещё {cnt - len(lines)}"
-    await message.answer(text, parse_mode="HTML")
+    await send_list(message, args)
 
 
 async def cmd_export(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("Команда доступна только администратору.")
         return
-
     args = message.text.replace("/export", "", 1).strip()
-    from_iso, to_iso, err = range_from_args(args)
-    if err:
-        await message.answer(err)
-        return
-
-    rows = await fetch_participants(from_iso, to_iso)
-    if not rows:
-        await message.answer("По этому фильтру нет участников.")
-        return
-
-    suffix = "all"
-    if args.strip().lower() == "today":
-        suffix = "today_utc"
-    elif args.strip():
-        suffix = args.strip().replace(" ", "_")
-
-    await export_to_excel_and_send(message, rows, suffix)
+    await send_export(message, args)
 
 
+# Admin menu buttons
 async def admin_menu_list(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
@@ -584,8 +608,7 @@ async def admin_menu_export_today(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
     await state.clear()
-    fake = Message.model_validate({**message.model_dump(), "text": "/export today"})
-    await cmd_export(fake)
+    await send_export(message, "today")
     await message.answer("Админ-меню:", reply_markup=admin_kb())
 
 
@@ -602,15 +625,13 @@ async def admin_list_filter_step(message: Message, state: FSMContext):
 
     if t == "Все":
         await state.clear()
-        fake = Message.model_validate({**message.model_dump(), "text": "/list"})
-        await cmd_list(fake)
+        await send_list(message, "")
         await message.answer("Админ-меню:", reply_markup=admin_kb())
         return
 
     if t == "Сегодня":
         await state.clear()
-        fake = Message.model_validate({**message.model_dump(), "text": "/list today"})
-        await cmd_list(fake)
+        await send_list(message, "today")
         await message.answer("Админ-меню:", reply_markup=admin_kb())
         return
 
@@ -626,8 +647,7 @@ async def admin_list_filter_step(message: Message, state: FSMContext):
         return
 
     await state.clear()
-    fake = Message.model_validate({**message.model_dump(), "text": f"/list {t}"})
-    await cmd_list(fake)
+    await send_list(message, t)
     await message.answer("Админ-меню:", reply_markup=admin_kb())
 
 
@@ -661,8 +681,7 @@ async def admin_list_range_collect(message: Message, state: FSMContext):
     d1 = parse_ymd(data["list_from"])
     args = f"{d1.isoformat()} {d2.isoformat()}"
     await state.clear()
-    fake = Message.model_validate({**message.model_dump(), "text": f"/list {args}"})
-    await cmd_list(fake)
+    await send_list(message, args)
     await message.answer("Админ-меню:", reply_markup=admin_kb())
 
 
@@ -679,15 +698,13 @@ async def admin_export_filter_step(message: Message, state: FSMContext):
 
     if t == "Все":
         await state.clear()
-        fake = Message.model_validate({**message.model_dump(), "text": "/export"})
-        await cmd_export(fake)
+        await send_export(message, "")
         await message.answer("Админ-меню:", reply_markup=admin_kb())
         return
 
     if t == "Сегодня":
         await state.clear()
-        fake = Message.model_validate({**message.model_dump(), "text": "/export today"})
-        await cmd_export(fake)
+        await send_export(message, "today")
         await message.answer("Админ-меню:", reply_markup=admin_kb())
         return
 
@@ -703,8 +720,7 @@ async def admin_export_filter_step(message: Message, state: FSMContext):
         return
 
     await state.clear()
-    fake = Message.model_validate({**message.model_dump(), "text": f"/export {t}"})
-    await cmd_export(fake)
+    await send_export(message, t)
     await message.answer("Админ-меню:", reply_markup=admin_kb())
 
 
@@ -738,8 +754,7 @@ async def admin_export_range_collect(message: Message, state: FSMContext):
     d1 = parse_ymd(data["export_from"])
     args = f"{d1.isoformat()} {d2.isoformat()}"
     await state.clear()
-    fake = Message.model_validate({**message.model_dump(), "text": f"/export {args}"})
-    await cmd_export(fake)
+    await send_export(message, args)
     await message.answer("Админ-меню:", reply_markup=admin_kb())
 
 

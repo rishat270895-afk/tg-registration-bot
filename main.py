@@ -28,7 +28,7 @@ DB_PATH = "participants.sqlite"
 # DB_PATH = "/data/participants.sqlite"
 
 # Put your Telegram user_ids here (2 admins supported)
-ADMIN_IDS = {922603146,700087896 }  # <-- replace with real IDs
+ADMIN_IDS = {922603146, 922603146}  # <-- replace with real IDs
 
 
 # ---------- FSM ----------

@@ -24,9 +24,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 RESET_PASSWORD = os.getenv("RESET_PASSWORD", "")  # set in Railway -> Variables
 
 DB_PATH = "participants.sqlite"
+# If you enabled Railway Volume mounted to /data, use this instead:
+# DB_PATH = "/data/participants.sqlite"
 
 # Put your Telegram user_ids here (2 admins supported)
-ADMIN_IDS = {922603146,700087896 }  # <-- replace with real IDs
+ADMIN_IDS = {111111111, 222222222}  # <-- replace with real IDs
 
 
 # ---------- FSM ----------
@@ -138,6 +140,13 @@ async def reset_database():
 
 
 # ---------- Keyboards ----------
+def user_start_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🚀 Старт")]],
+        resize_keyboard=True
+    )
+
+
 def consent_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="✅ Согласен"), KeyboardButton(text="❌ Не согласен")]],
@@ -279,19 +288,45 @@ async def export_to_excel_and_send(message: Message, rows, suffix: str):
     )
 
 
-# ---------- Public handlers ----------
+# ---------- Public flow ----------
+async def show_user_start(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Нажмите кнопку «🚀 Старт», чтобы начать регистрацию.",
+        reply_markup=user_start_kb()
+    )
+
+
 async def start(message: Message, state: FSMContext):
+    # /start shows the "🚀 Старт" button for participants
     existing = await get_by_telegram_id(message.from_user.id)
     if existing:
         pid, tid, phone, fn, ln, consent, created_at = existing
+        await state.clear()
         await message.answer(
             f"Вы уже зарегистрированы ✅\n"
             f"Номер участника: <b>{pid}</b>\n"
-            f"Имя: {fn}\nФамилия: {ln}\nТелефон: {phone}",
+            f"Имя: {fn}\nФамилия: {ln}\nТелефон: {phone}\n\n"
+            f"Нажмите «🚀 Старт», чтобы открыть начало.",
             parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=user_start_kb()
         )
+        return
+
+    await show_user_start(message, state)
+
+
+async def on_user_start_button(message: Message, state: FSMContext):
+    # Begin the registration flow from the "🚀 Старт" button
+    existing = await get_by_telegram_id(message.from_user.id)
+    if existing:
+        pid, tid, phone, fn, ln, consent, created_at = existing
         await state.clear()
+        await message.answer(
+            f"Вы уже зарегистрированы ✅\nНомер участника: <b>{pid}</b>\n\nКоманда /my — показать номер.",
+            parse_mode="HTML",
+            reply_markup=user_start_kb()
+        )
         return
 
     await message.answer(
@@ -306,20 +341,21 @@ async def start(message: Message, state: FSMContext):
 async def cmd_my(message: Message, state: FSMContext):
     existing = await get_by_telegram_id(message.from_user.id)
     if not existing:
-        await message.answer("Вы ещё не зарегистрированы. Нажмите /start")
+        await message.answer("Вы ещё не зарегистрированы. Нажмите /start", reply_markup=user_start_kb())
         return
     pid, tid, phone, fn, ln, consent, created_at = existing
     await message.answer(
         f"Ваш номер участника: <b>{pid}</b>\n"
         f"Имя: {fn}\nФамилия: {ln}\nТелефон: {phone}",
         parse_mode="HTML",
+        reply_markup=user_start_kb()
     )
     await state.clear()
 
 
 async def cmd_reset(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Сбросил текущий шаг. Нажмите /start", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Сбросил текущий шаг. Нажмите «🚀 Старт» или /start.", reply_markup=user_start_kb())
 
 
 async def on_consent(message: Message, state: FSMContext):
@@ -328,8 +364,8 @@ async def on_consent(message: Message, state: FSMContext):
     if text == "❌ Не согласен":
         await message.answer(
             "Понял. Без согласия я не могу зарегистрировать вас.\n"
-            "Если передумаете — нажмите /start.",
-            reply_markup=ReplyKeyboardRemove()
+            "Если передумаете — нажмите «🚀 Старт» или /start.",
+            reply_markup=user_start_kb()
         )
         await state.clear()
         return
@@ -366,7 +402,7 @@ async def on_phone(message: Message, state: FSMContext):
         await message.answer(
             f"Вы уже зарегистрированы ✅\nНомер участника: <b>{pid}</b>",
             parse_mode="HTML",
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=user_start_kb()
         )
         await state.clear()
         return
@@ -378,7 +414,7 @@ async def on_phone(message: Message, state: FSMContext):
             "Этот номер телефона уже зарегистрирован другим участником.\n"
             "Если это ошибка — обратитесь к организатору.\n"
             f"(Номер участника по этому телефону: {pid}, имя: {fn} {ln})",
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=user_start_kb()
         )
         await state.clear()
         return
@@ -413,13 +449,17 @@ async def on_last_name(message: Message, state: FSMContext):
     existing = await get_by_telegram_id(message.from_user.id)
     if existing:
         pid, *_ = existing
-        await message.answer(f"Вы уже зарегистрированы ✅ Номер участника: <b>{pid}</b>", parse_mode="HTML")
+        await message.answer(
+            f"Вы уже зарегистрированы ✅ Номер участника: <b>{pid}</b>",
+            parse_mode="HTML",
+            reply_markup=user_start_kb()
+        )
         await state.clear()
         return
 
     same_phone = await get_by_phone(phone)
     if same_phone and same_phone[1] != message.from_user.id:
-        await message.answer("Этот номер уже зарегистрирован. Обратитесь к организатору.")
+        await message.answer("Этот номер уже зарегистрирован. Обратитесь к организатору.", reply_markup=user_start_kb())
         await state.clear()
         return
 
@@ -435,9 +475,13 @@ async def on_last_name(message: Message, state: FSMContext):
         existing = await get_by_telegram_id(message.from_user.id)
         if existing:
             participant_id = existing[0]
-            await message.answer(f"Вы уже зарегистрированы ✅ Номер участника: <b>{participant_id}</b>", parse_mode="HTML")
+            await message.answer(
+                f"Вы уже зарегистрированы ✅ Номер участника: <b>{participant_id}</b>",
+                parse_mode="HTML",
+                reply_markup=user_start_kb()
+            )
         else:
-            await message.answer("Не удалось зарегистрировать (возможно, номер уже занят). Обратитесь к организатору.")
+            await message.answer("Не удалось зарегистрировать (возможно, номер уже занят). Обратитесь к организатору.", reply_markup=user_start_kb())
         await state.clear()
         return
 
@@ -445,7 +489,8 @@ async def on_last_name(message: Message, state: FSMContext):
         "Готово! Вы зарегистрированы ✅\n"
         f"Ваш номер участника: <b>{participant_id}</b>\n\n"
         "Команда /my — показать мой номер.",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=user_start_kb()
     )
     await state.clear()
 
@@ -539,7 +584,6 @@ async def admin_menu_export_today(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
     await state.clear()
-    # Trigger same logic as /export today
     fake = Message.model_validate({**message.model_dump(), "text": "/export today"})
     await cmd_export(fake)
     await message.answer("Админ-меню:", reply_markup=admin_kb())
@@ -773,6 +817,7 @@ async def main():
 
     # Public
     dp.message.register(start, CommandStart())
+    dp.message.register(on_user_start_button, lambda m: (m.text or "") == "🚀 Старт")
     dp.message.register(cmd_my, Command("my"))
     dp.message.register(cmd_reset, Command("reset"))
 

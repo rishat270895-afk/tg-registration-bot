@@ -24,13 +24,12 @@ from aiogram.fsm.context import FSMContext
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RESET_PASSWORD = os.getenv("RESET_PASSWORD", "")  # set in Railway -> Variables
 
-# DB file path
 DB_PATH = "participants.sqlite"
 # If you enabled Railway Volume mounted to /data, use this instead:
 # DB_PATH = "/data/participants.sqlite"
 
 # Put your Telegram user_ids here (2 admins supported)
-ADMIN_IDS = {922603146,700087896 }  # <-- replace with real IDs
+ADMIN_IDS = {111111111, 222222222}  # <-- replace with real IDs
 
 
 # ---------- FSM ----------
@@ -38,7 +37,6 @@ class Reg(StatesGroup):
     waiting_consent = State()
     waiting_phone = State()
     waiting_first_name = State()
-    waiting_last_name = State()
 
 
 class AdminFSM(StatesGroup):
@@ -270,20 +268,18 @@ def autosize_worksheet_columns(ws):
 
 
 async def export_to_excel_and_send(message: Message, rows, suffix: str):
-    """
-    Save to /tmp because Railway filesystem may be read-only in app dir.
-    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Participants"
 
-    ws.append(["Номер", "Telegram ID", "Телефон", "Имя", "Фамилия", "Согласие", "Дата регистрации (UTC)"])
+    ws.append(["Номер", "Telegram ID", "Телефон", "Имя", "Согласие", "Дата регистрации (UTC)"])
     for r in rows:
         pid, tid, phone, fn, ln, consent, created_at = r
-        ws.append([pid, tid, phone, fn, ln, "Да" if consent else "Нет", created_at])
+        ws.append([pid, tid, phone, fn, "Да" if consent else "Нет", created_at])
 
     autosize_worksheet_columns(ws)
 
+    # Save to /tmp (writable on Railway) and clean up after sending
     with tempfile.NamedTemporaryFile(prefix=f"participants_{suffix}_", suffix=".xlsx", delete=False, dir="/tmp") as tmp:
         tmp_path = tmp.name
 
@@ -301,7 +297,7 @@ async def export_to_excel_and_send(message: Message, rows, suffix: str):
             pass
 
 
-# ---------- List / Export core (NO fake Message!) ----------
+# ---------- Shared admin output helpers ----------
 async def send_list(message: Message, args: str):
     from_iso, to_iso, err = range_from_args(args)
     if err:
@@ -312,7 +308,7 @@ async def send_list(message: Message, args: str):
     rows = await fetch_participants(from_iso, to_iso)
 
     preview = rows[:30]
-    lines = [f"{pid}. {fn} {ln} — {phone}" for (pid, tid, phone, fn, ln, consent, created_at) in preview]
+    lines = [f"{pid}. {fn} — {phone}" for (pid, tid, phone, fn, ln, consent, created_at) in preview]
 
     label = "все записи"
     if args.strip().lower() == "today":
@@ -366,7 +362,7 @@ async def start(message: Message, state: FSMContext):
         await message.answer(
             f"Вы уже зарегистрированы ✅\n"
             f"Номер участника: <b>{pid}</b>\n"
-            f"Имя: {fn}\nФамилия: {ln}\nТелефон: {phone}\n\n"
+            f"Имя: {fn}\nТелефон: {phone}\n\n"
             f"Нажмите «🚀 Старт», чтобы открыть начало.",
             parse_mode="HTML",
             reply_markup=user_start_kb()
@@ -390,7 +386,7 @@ async def on_user_start_button(message: Message, state: FSMContext):
         return
 
     await message.answer(
-        "Перед регистрацией нужно согласие на обработку данных (телефон, имя, фамилия) "
+        "Перед регистрацией нужно согласие на обработку данных (телефон, имя) "
         "для целей регистрации участника.\n\n"
         "Вы согласны?",
         reply_markup=consent_kb()
@@ -406,7 +402,7 @@ async def cmd_my(message: Message, state: FSMContext):
     pid, tid, phone, fn, ln, consent, created_at = existing
     await message.answer(
         f"Ваш номер участника: <b>{pid}</b>\n"
-        f"Имя: {fn}\nФамилия: {ln}\nТелефон: {phone}",
+        f"Имя: {fn}\nТелефон: {phone}",
         parse_mode="HTML",
         reply_markup=user_start_kb()
     )
@@ -473,7 +469,7 @@ async def on_phone(message: Message, state: FSMContext):
         await message.answer(
             "Этот номер телефона уже зарегистрирован другим участником.\n"
             "Если это ошибка — обратитесь к организатору.\n"
-            f"(Номер участника по этому телефону: {pid}, имя: {fn} {ln})",
+            f"(Номер участника по этому телефону: {pid}, имя: {fn})",
             reply_markup=user_start_kb()
         )
         await state.clear()
@@ -490,21 +486,12 @@ async def on_first_name(message: Message, state: FSMContext):
         await message.answer("Введите корректное имя (2–50 символов):")
         return
 
-    await state.update_data(first_name=first_name)
-    await message.answer("Введите вашу фамилию:")
-    await state.set_state(Reg.waiting_last_name)
-
-
-async def on_last_name(message: Message, state: FSMContext):
-    last_name = (message.text or "").strip()
-    if not last_name or len(last_name) < 2 or len(last_name) > 50:
-        await message.answer("Введите корректную фамилию (2–50 символов):")
-        return
-
     data = await state.get_data()
     phone = data["phone"]
-    first_name = data["first_name"]
     consent = int(data.get("consent", 0))
+
+    # Фамилию не спрашиваем (оставляем пустой строкой для совместимости с базой)
+    last_name = ""
 
     existing = await get_by_telegram_id(message.from_user.id)
     if existing:
@@ -541,14 +528,19 @@ async def on_last_name(message: Message, state: FSMContext):
                 reply_markup=user_start_kb()
             )
         else:
-            await message.answer("Не удалось зарегистрировать (возможно, номер уже занят). Обратитесь к организатору.",
-                                 reply_markup=user_start_kb())
+            await message.answer(
+                "Не удалось зарегистрировать (возможно, номер уже занят). Обратитесь к организатору.",
+                reply_markup=user_start_kb()
+            )
         await state.clear()
         return
 
     await message.answer(
-        "Готово! Вы зарегистрированы ✅\n"
-        f"Ваш номер участника: <b>{participant_id}</b>\n\n"
+        "Готово! Вы зарегистрированы ✅
+"
+        f"Ваш номер участника: <b>{participant_id}</b>
+
+"
         "Команда /my — показать мой номер.",
         parse_mode="HTML",
         reply_markup=user_start_kb()
@@ -572,7 +564,6 @@ async def admin_close_menu(message: Message, state: FSMContext):
     await message.answer("Меню закрыто.", reply_markup=ReplyKeyboardRemove())
 
 
-# Admin commands
 async def cmd_list(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("Команда доступна только администратору.")
@@ -589,7 +580,6 @@ async def cmd_export(message: Message):
     await send_export(message, args)
 
 
-# Admin menu buttons
 async def admin_menu_list(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
@@ -641,6 +631,7 @@ async def admin_list_filter_step(message: Message, state: FSMContext):
         await state.update_data(list_step="from")
         return
 
+    # If admin typed range directly
     from_iso, to_iso, err = range_from_args(t)
     if err:
         await message.answer("Не понял. Нажми кнопку фильтра или введи: YYYY-MM-DD YYYY-MM-DD", reply_markup=admin_filter_kb())
@@ -714,6 +705,7 @@ async def admin_export_filter_step(message: Message, state: FSMContext):
         await state.update_data(export_step="from")
         return
 
+    # If admin typed range directly
     from_iso, to_iso, err = range_from_args(t)
     if err:
         await message.answer("Не понял. Нажми кнопку фильтра или введи: YYYY-MM-DD YYYY-MM-DD", reply_markup=admin_filter_kb())
@@ -862,7 +854,6 @@ async def main():
     dp.message.register(on_consent, Reg.waiting_consent)
     dp.message.register(on_phone, Reg.waiting_phone)
     dp.message.register(on_first_name, Reg.waiting_first_name)
-    dp.message.register(on_last_name, Reg.waiting_last_name)
 
     await dp.start_polling(bot)
 

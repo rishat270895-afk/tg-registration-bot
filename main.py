@@ -23,15 +23,19 @@ DB_PATH = "participants.sqlite"
 ADMIN_IDS = {922603146, 700087896}
 
 
+# ================= FSM =================
+
 class Reg(StatesGroup):
     waiting_consent = State()
     waiting_phone = State()
-    waiting_first_name = State()
+    waiting_name = State()
 
 
 class AdminFSM(StatesGroup):
-    reset_wait_password = State()
+    waiting_password = State()
 
+
+# ================= DATABASE =================
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS participants (
@@ -39,7 +43,6 @@ CREATE TABLE IF NOT EXISTS participants (
     telegram_id INTEGER UNIQUE NOT NULL,
     phone TEXT UNIQUE NOT NULL,
     first_name TEXT NOT NULL,
-    last_name TEXT NOT NULL,
     consent INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -65,14 +68,23 @@ async def add_user(telegram_id, phone, first_name, consent):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
-            INSERT INTO participants (telegram_id, phone, first_name, last_name, consent, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO participants (telegram_id, phone, first_name, consent, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (telegram_id, phone, first_name, "", consent, datetime.utcnow().isoformat()),
+            (telegram_id, phone, first_name, consent, datetime.utcnow().isoformat()),
         )
         await db.commit()
         return cur.lastrowid
 
+
+async def reset_database():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM participants")
+        await db.execute("DELETE FROM sqlite_sequence WHERE name='participants'")
+        await db.commit()
+
+
+# ================= KEYBOARDS =================
 
 def start_kb():
     return ReplyKeyboardMarkup(
@@ -108,14 +120,16 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
+# ================= HANDLERS =================
+
 async def start(message: Message, state: FSMContext):
     user = await get_user(message.from_user.id)
     if user:
         pid, phone, name = user
         await message.answer(
-            f"Вы уже зарегистрированы ✅\\n"
-            f"Номер: <b>{pid}</b>\\n"
-            f"Имя: {name}\\n"
+            f"Вы уже зарегистрированы ✅\n"
+            f"Ваш номер: <b>{pid}</b>\n"
+            f"Имя: {name}\n"
             f"Телефон: {phone}",
             parse_mode="HTML",
             reply_markup=start_kb()
@@ -152,7 +166,7 @@ async def phone_handler(message: Message, state: FSMContext):
 
     await state.update_data(phone=message.contact.phone_number)
     await message.answer("Введите имя:", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(Reg.waiting_first_name)
+    await state.set_state(Reg.waiting_name)
 
 
 async def name_handler(message: Message, state: FSMContext):
@@ -163,8 +177,8 @@ async def name_handler(message: Message, state: FSMContext):
     pid = await add_user(message.from_user.id, phone, message.text.strip(), consent)
 
     await message.answer(
-        f"Готово! Вы зарегистрированы ✅\\n"
-        f"Ваш номер: <b>{pid}</b>",
+        f"Готово! Вы зарегистрированы ✅\n"
+        f"Ваш порядковый номер: <b>{pid}</b>",
         parse_mode="HTML",
         reply_markup=start_kb()
     )
@@ -179,7 +193,7 @@ async def my_handler(message: Message):
 
     pid, phone, name = user
     await message.answer(
-        f"Ваш номер: <b>{pid}</b>\\nИмя: {name}\\nТелефон: {phone}",
+        f"Ваш номер: <b>{pid}</b>\nИмя: {name}\nТелефон: {phone}",
         parse_mode="HTML"
     )
 
@@ -189,7 +203,7 @@ async def admin_reset(message: Message, state: FSMContext):
         return
 
     await message.answer("Введите пароль для сброса:")
-    await state.set_state(AdminFSM.reset_wait_password)
+    await state.set_state(AdminFSM.waiting_password)
 
 
 async def reset_password_handler(message: Message, state: FSMContext):
@@ -197,14 +211,12 @@ async def reset_password_handler(message: Message, state: FSMContext):
         await message.answer("Неверный пароль.")
         return
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM participants")
-        await db.execute("DELETE FROM sqlite_sequence WHERE name='participants'")
-        await db.commit()
-
+    await reset_database()
     await message.answer("База очищена ✅", reply_markup=admin_kb())
     await state.clear()
 
+
+# ================= MAIN =================
 
 async def main():
     if not BOT_TOKEN:
@@ -221,12 +233,16 @@ async def main():
 
     dp.message.register(consent_handler, Reg.waiting_consent)
     dp.message.register(phone_handler, Reg.waiting_phone)
-    dp.message.register(name_handler, Reg.waiting_first_name)
+    dp.message.register(name_handler, Reg.waiting_name)
 
     dp.message.register(admin_reset, lambda m: m.text == "🧹 Ресет базы")
-    dp.message.register(reset_password_handler, AdminFSM.reset_wait_password)
+    dp.message.register(reset_password_handler, AdminFSM.waiting_password)
 
     await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
 if __name__ == "__main__":
